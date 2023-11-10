@@ -200,7 +200,7 @@ while True:
     for notified_socket in read_sockets:
         if notified_socket == server_socket:
             client_socket, client_address = server_socket.accept()
-            #nickname = client_socket.recv(BUFFER_SIZE).decode('utf-8').strip()
+            nickname = client_socket.recv(BUFFER_SIZE).decode('utf-8').strip()
             threading.Thread(target=client_thread, args=(client_socket, client_address)).start()
             
             if nickname in nicknames or not nickname:
