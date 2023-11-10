@@ -29,9 +29,6 @@ def receive_messages():
                 # El servidor está pidiendo la lista de artefactos.
                 artefactos = input("Ingresa tus artefactos separados por comas: ")
                 client_socket.send(f"Artefactos: {artefactos}".encode('utf-8'))
-            if "[SERVER] ¡OK!" in message or "Tus artefactos son:" in message:
-                # Esta es la confirmación de los artefactos, puedes continuar con la lógica normal o manejarlo de alguna manera.
-                pass
         except Exception as e:
             print(f"Error al recibir datos: {e}")
             client_socket.close()
