@@ -1,254 +1,180 @@
-import json
 import socket
-import select
 import threading
-from threading import Lock
+import json
 
-# Cargar el archivo JSON con los nombres de los artefactos.
-with open('artefactos.json', 'r') as file:
-    artefact_names = json.load(file)
-
+# Parámetros del servidor
 SERVER_HOST = '0.0.0.0'
 SERVER_PORT = 5000
-MAX_CLIENTS = 3
 BUFFER_SIZE = 4096
+MAX_CONNECTIONS = 3  # Máximo de clientes que pueden conectarse
 
-# Lista para manejar sockets de clientes
-client_sockets = []
-nicknames = []
-client_artefacts = {}
-pending_offers = {}
-
-# Lock (mutex) para proteger las operaciones sobre datos compartidos
-data_lock = Lock()
+# Lista de clientes conectados
+clients = {}
 
 # Crear un socket TCP/IP
 server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+# Vincular el socket a la dirección y puerto
 server_socket.bind((SERVER_HOST, SERVER_PORT))
-server_socket.listen(MAX_CLIENTS)
-print(f"Escuchando en {SERVER_HOST}:{SERVER_PORT}...")
 
-def broadcast(message, sender_socket=None):
-    for client_socket in client_sockets:
-        if client_socket != sender_socket:
-            client_socket.send(message)
+# Escuchar conexiones entrantes
+server_socket.listen(MAX_CONNECTIONS)
 
-def send_private_message(nickname, message):
-    if nickname in nicknames:
-        idx = nicknames.index(nickname)
-        client_sockets[idx].send(message.encode('utf-8'))
+with open('artefactos.json', 'r') as file:
+    artefactos = json.load(file)
 
-def remove_socket(client_socket):
-    if client_socket in client_sockets:
-        idx = client_sockets.index(client_socket)
-        nickname = nicknames[idx]
-        client_sockets.remove(client_socket)
-        nicknames.remove(nickname)
-        client_artefacts.pop(nickname, None)
-        broadcast(f"[SERVER] Cliente {nickname} desconectado.\n".encode('utf-8'))
-        print(f"[SERVER] Cliente {nickname} desconectado.")
+print(f"Servidor escuchando en {SERVER_HOST}:{SERVER_PORT}...")
 
-def welcome_goodbye_message(client_socket, nickname, is_welcome=True):
-    if is_welcome:
-        client_socket.send("¡Bienvenid@ al chat de Granjerxs!\n".encode('utf-8'))
-        client_socket.send("[SERVER] Cuentame, ¿que artefactos tienes?\n".encode('utf-8'))
-        broadcast(f"[SERVER] Cliente {nickname} conectado.\n".encode('utf-8'), client_socket)
-    else:
-        client_socket.send("¡Adios y suerte completando tu coleccion!\n".encode('utf-8'))
-        broadcast(f"[SERVER] Cliente {nickname} desconectado.\n".encode('utf-8'), client_socket)
-
-def handle_offer(client_socket, offer_nickname, my_artefact_id, their_artefact_id, nickname):
-    if offer_nickname not in nicknames:
-        client_socket.send(f"[SERVER] No hay ningun cliente con el nombre {offer_nickname}.\n".encode('utf-8'))
-        return
-
-    if my_artefact_id not in client_artefacts[nickname]:
-        client_socket.send("[SERVER] No posees ese artefacto para ofrecer.\n".encode('utf-8'))
-        return
-
-    if their_artefact_id not in client_artefacts[offer_nickname]:
-        client_socket.send("[SERVER] El otro cliente no posee el artefacto que pides.\n".encode('utf-8'))
-        return
-
-    # Si todo está en orden, añadir la oferta al registro de ofertas pendientes
-    pending_offers[nickname] = (offer_nickname, my_artefact_id, their_artefact_id)
-    send_private_message(offer_nickname, f"[SERVER] Tienes una oferta de intercambio de {nickname}: {my_artefact_id} por tu artefacto {their_artefact_id}.\n")
-
-def handle_accept(client_socket, nickname):
-    if nickname not in pending_offers:
-        client_socket.send("[SERVER] No tienes ninguna oferta pendiente de aceptar.\n".encode('utf-8'))
-        return
-
-    offer_nickname, my_artefact_id, their_artefact_id = pending_offers[nickname]
-
-    # Realizar el intercambio
-    client_artefacts[nickname].remove(their_artefact_id)
-    client_artefacts[nickname].append(my_artefact_id)
-    client_artefacts[offer_nickname].remove(my_artefact_id)
-    client_artefacts[offer_nickname].append(their_artefact_id)
-
-    # Limpiar la oferta pendiente
-    del pending_offers[nickname]
-
-    # Informar a ambos clientes
-    client_socket.send("[SERVER] ¡Intercambio realizado!\n".encode('utf-8'))
-    send_private_message(offer_nickname, f"[SERVER] ¡Intercambio realizado con {nickname}!\n")
-
-
-def handle_artefacts(client_socket, artefact_ids, nickname):
-    artefact_list = [artefact_names[str(art_id)] for art_id in artefact_ids if str(art_id) in artefact_names]
-    client_artefacts[nickname] = artefact_list
-    client_socket.send(f"[SERVER] Tus artefactos son: {', '.join(artefact_list)}.\n¿Está bien? (Si/No)\n".encode('utf-8'))
-
-def handle_commands(client_socket, message, nickname):
-    parts = message.split(' ')
-    command = parts[0]
-
-    if command == ':q':
-        remove_socket(client_socket)
-    elif command == ':p' and len(parts) >= 3:
-        target_nickname = parts[1]
-        private_message = ' '.join(parts[2:])
-        send_private_message(target_nickname, f"[PM de {nickname}]: {private_message}")
-    elif command == ':u':
-        online_users = ', '.join(nicknames)
-        client_socket.send(f"[SERVER] Usuarios conectados: {online_users}\n".encode('utf-8'))
-    elif command == ':smile':
-        client_socket.send(":)\n".encode('utf-8'))
-    elif command == ':angry':
-        client_socket.send(">:(""\n".encode('utf-8'))
-    elif command == ':offer' and len(parts) == 4:
-        handle_offer(client_socket, parts[1], parts[2], parts[3], nickname)
-    elif command == ':accept':
-        handle_accept(client_socket, nickname)
-    else:
-        client_socket.send("[SERVER] Comando no reconocido.\n".encode('utf-8'))
-        
-
-def client_thread(client_socket, client_address):
-    nickname = None  # Inicializar nickname como None
-    try:
-        # Solicitar y recibir el nickname del cliente
-        client_socket.send("Por favor, envía tu nickname:".encode('utf-8'))
-        nickname = client_socket.recv(BUFFER_SIZE).decode('utf-8').strip()
-        
-        # Comprobar y añadir el nickname a la lista de clientes
-        with data_lock:
-            if nickname in nicknames or not nickname:
-                client_socket.send("Nickname invalid or already taken.\n".encode('utf-8'))
-                client_socket.close()
-                return
-            else:
-                client_sockets.append(client_socket)
-                nicknames.append(nickname)
-                client_artefacts[nickname] = []  # Inicializar lista de artefactos para el usuario
-
-        # Informar en el servidor que un cliente se ha conectado
-        print(f"[SERVER] Cliente {nickname} conectado desde {client_address}.")
-
-        # Enviar bienvenida al cliente
-        client_socket.send(f"¡Bienvenid@ al chat de Granjerxs, {nickname}!\n".encode('utf-8'))
-
-        # Solicitar la lista de artefactos del cliente
-        client_socket.send("[SERVER] Cuéntame, ¿qué artefactos tienes? (envía los IDs separados por comas)".encode('utf-8'))
-        
-        # Recibir la lista de artefactos del cliente
-        artefactos_str = client_socket.recv(BUFFER_SIZE).decode('utf-8').strip()
-        artefactos_ids = [int(id.strip()) for id in artefactos_str.split(',') if id.strip().isdigit()]
-
-        # Añadir la lista de artefactos al cliente
-        with data_lock:
-            client_artefacts[nickname] = artefactos_ids
-
-        # Enviar confirmación de artefactos al cliente
-        artefactos_nombres = [artefact_names.get(str(id), "Artefacto desconocido") for id in artefactos_ids]
-        client_socket.send(f"[SERVER] Tus artefactos son: {', '.join(artefactos_nombres)}.\n".encode('utf-8'))
-        
-        # Bucle para recibir y manejar comandos y mensajes del cliente
-        while True:
-            message = client_socket.recv(BUFFER_SIZE).decode('utf-8').strip()
-            if message:
-                with data_lock:
-                    if message.startswith(':'):
-                        handle_commands(client_socket, message, nickname)
-                    else:
-                        # Aquí se manejarían otros tipos de mensajes que no son comandos
-                        pass
-            else:
-                # Cliente se desconectó
-                break
-    except ConnectionResetError:
-        print(f"[SERVER] La conexión con el cliente {nickname} se cerró inesperadamente.")
-    except ValueError as e:
-        client_socket.send(f"[SERVER] Error: {e}\n".encode('utf-8'))
-    except Exception as e:
-        print(f"[SERVER] Error: {e}")
-    finally:
-        with data_lock:
-            if nickname in nicknames:
-                remove_socket(client_socket)
-        client_socket.close()
-
-
-
-
-
-while True:
-    read_sockets, _, exception_sockets = select.select([server_socket] + client_sockets, [], client_sockets)
-
-    for notified_socket in read_sockets:
-        if notified_socket == server_socket:
-            client_socket, client_address = server_socket.accept()
-            nickname = client_socket.recv(BUFFER_SIZE).decode('utf-8').strip()
-            threading.Thread(target=client_thread, args=(client_socket, client_address)).start()
-            
-            if nickname in nicknames or not nickname:
-                client_socket.send("Nickname invalid or already taken.\n".encode('utf-8'))
-                client_socket.close()
-            else:
-                client_sockets.append(client_socket)
-                nicknames.append(nickname)
-                print(f"[SERVER] Cliente {nickname} conectado.")
-                welcome_goodbye_message(client_socket, nickname)
-        else:
+def broadcast(message, sender_nickname, sender_socket):
+    for client_socket, info in clients.items():
+        if client_socket != sender_socket:  # No enviar el mensaje al cliente que lo envió
             try:
-                message = notified_socket.recv(BUFFER_SIZE).decode('utf-8').strip()
-                nickname = nicknames[client_sockets.index(notified_socket)]
-                if message:
-                    if message.lower() == 'no':
-                        client_socket.send("[SERVER] ¡Vamos de nuevo! ¿Qué artefactos tienes?\n".encode('utf-8'))
-                    elif message.lower() == 'si':
-                        client_socket.send("[SERVER] ¡OK!\n".encode('utf-8'))
-                    elif message.startswith(':'):
-                        handle_commands(notified_socket, message, nickname)
-                    else:
-                        try:
-                            # Asumimos que el mensaje es una lista de IDs de artefactos separados por comas.
-                            artefact_ids = [int(id.strip()) for id in message.split(',')]
-        
-                            # Verificamos que el número de artefactos sea correcto
-                            if 0 < len(artefact_ids):
-                                handle_artefacts(notified_socket, artefact_ids, nickname)
-                            else:
-                                notified_socket.send("[SERVER] Error: Número de artefactos incorrecto, se esperaban de 1 a 6.\n".encode('utf-8'))
-
-                        except ValueError:
-                            # Si hay un ValueError, significa que el mensaje no era una lista de números.
-                            notified_socket.send("[SERVER] Error: Se esperaba una lista de IDs de artefactos o algun comando\n".encode('utf-8'))
-
-                else:
-                    print(f"[SERVER] Cliente {nickname} se desconectó.")
-                    remove_socket(notified_socket)
-            except ConnectionResetError:
-                # Esta excepción específica significa que la conexión fue cerrada inesperadamente
-                print(f"[SERVER] La conexión con el cliente {nickname} se cerró inesperadamente.")
-                remove_socket(notified_socket)
+                # Enviar el mensaje con el nombre del emisor
+                client_socket.send(f"{sender_nickname}: {message}".encode('utf-8'))
             except Exception as e:
-                print(f"Error: {e}")
-                remove_socket(notified_socket)
+                print(f"Error al enviar mensaje: {e}")
+                client_socket.close()
+                remove_client(client_socket)
 
-    for notified_socket in exception_sockets:
-        remove_socket(notified_socket)
 
+
+def handle_client(client_socket):
+    client_socket.send("¡Bienvenid@ al chat de Granjerxs!\n[SERVER] Cuéntame, ¿qué artefactos tienes?".encode('utf-8'))
+    
+    while True:
+        # Recibir y procesar la respuesta de artefactos
+        artefactos_msg = client_socket.recv(BUFFER_SIZE).decode('utf-8')
+        artefactos_ids = artefactos_msg.split(', ')
+        artefactos_nombres = [artefactos[id] for id in artefactos_ids if id in artefactos]
+
+        # Confirmar artefactos al cliente
+        confirmacion = f"[SERVER] Tus artefactos son: {', '.join(artefactos_nombres)}\n¿Está bien? (Si/No)\n"
+        client_socket.send(confirmacion.encode('utf-8'))
+
+        # Recibir y procesar la confirmación del cliente
+        confirmacion_respuesta = client_socket.recv(BUFFER_SIZE).decode('utf-8')
+        if confirmacion_respuesta.lower() == 'si':
+            client_socket.send("[SERVER] ¡OK!\n".encode('utf-8'))
+            clients[client_socket]['artefactos'] = artefactos_nombres  # Almacenar los artefactos
+            break
+        elif confirmacion_respuesta.lower() == 'no':
+            client_socket.send("[SERVER] Por favor, ingresa nuevamente los números de tus artefactos:".encode('utf-8'))
+        else:
+            client_socket.send("[SERVER] Respuesta no reconocida, por favor responde con 'Si' o 'No'.".encode('utf-8'))
+
+    # Continuar con el resto del manejo del cliente
+    while True:
+        try:
+            message = client_socket.recv(BUFFER_SIZE).decode('utf-8')
+            if message:
+                sender_nickname = clients[client_socket]['nickname']
+                # Procesar comandos especiales aquí
+                if message == ":q":
+                    remove_client(client_socket)
+                    break  # Terminar este hilo
+                elif message.startswith(":p"):
+                    parts = message.split(' ', 2)
+                    # Verifica si el mensaje tiene la cantidad de partes esperada
+                    if len(parts) == 3:
+                        _, recipient_nickname, private_msg = parts
+                        send_private_message(private_msg, recipient_nickname, sender_nickname, client_socket)
+                    else:
+                        error_msg = "Error: El formato del mensaje privado es incorrecto. Usa :p <destinatario> <mensaje>."
+                        client_socket.send(error_msg.encode('utf-8'))
+                elif message == ":u":
+                    list_users(client_socket)
+                elif message.startswith(":offer"):
+                    _, recipient_nickname, my_artifact_id, their_artifact_id = message.split()
+                    # Aquí debes añadir la lógica para manejar la oferta de intercambio de artefactos
+                # Agregar aquí otros comandos
+                elif message == ":smile":
+                    client_socket.send(":)".encode('utf-8'))
+                elif message == ':angry':
+                    client_socket.send(">:(".encode('utf-8'))
+                elif message == ':artefactos':
+                    artefactos_usuario = clients[client_socket].get('artefactos', [])
+                    artefactos_msg = "Tus artefactos son: " + ", ".join(artefactos_usuario)
+                    client_socket.send(artefactos_msg.encode('utf-8'))
+                else:
+                    # Procesar envío de mensajes normales
+                    broadcast(message, sender_nickname, client_socket)
+
+        except socket.error as e:
+            if e.errno == 10054:
+                remove_client(client_socket)
+                break
+            else:
+                remove_client(client_socket)
+                break
+        except Exception as e:
+            print(f"Error: {e}")
+            remove_client(client_socket)
+            break
+
+def remove_client(client_socket):
+    nickname = clients[client_socket]['nickname']
+    del clients[client_socket]  # Elimina al cliente antes de enviar el mensaje de desconexión
+    broadcast(f"Cliente {nickname} desconectado.", '[SERVER]', None)
+    client_socket.close()
+    print(f"[SERVER] Cliente {nickname} desconectado.")  # Imprimir el mensaje en el servidor
+
+
+def send_private_message(private_msg, recipient_nickname, sender_nickname, sender_socket):
+    recipient_socket = None
+    for sock, info in clients.items():
+        if info['nickname'] == recipient_nickname:
+            recipient_socket = sock
+            break
+    if recipient_socket:
+        try:
+            recipient_socket.send(f"Privado de {sender_nickname}: {private_msg}".encode('utf-8'))
+        except Exception as e:
+            print(f"Error enviando mensaje privado: {e}")
+    else:
+        # Si el destinatario no se encuentra, enviar un mensaje de error al emisor
+        sender_socket.send(f"Usuario {recipient_nickname} no encontrado.".encode('utf-8'))
+
+
+def receive_clients(server_socket):
+    while True:
+        client_socket, client_address = server_socket.accept()
+        client_socket.send("Elija un nickname:".encode('utf-8'))
+        
+        nickname = client_socket.recv(BUFFER_SIZE).decode('utf-8').strip()
+        if not nickname:
+            client_socket.send("No se recibió un nickname válido. Conexión cerrada.".encode('utf-8'))
+            client_socket.close()
+            continue
+        
+        if nickname in [data['nickname'] for _, data in clients.items()]:
+            client_socket.send("Nickname invalid or already taken. Conexión cerrada.".encode('utf-8'))
+            client_socket.close()
+            continue
+        
+        clients[client_socket] = {'nickname': nickname, 'address': client_address}
+        
+        # Confirmación del nickname
+        client_socket.send("Nickname OK.".encode('utf-8'))
+        
+        print(f"[SERVER] Cliente {nickname} conectado.")
+        broadcast(f"Cliente {nickname} conectado.", 'SERVER', client_socket)
+        
+        # Iniciar un nuevo hilo para atender al cliente
+        thread = threading.Thread(target=handle_client, args=(client_socket,))
+        thread.start()
+        
+        
+def list_users(requesting_socket):
+    user_list = "\n".join([info['nickname'] for sock, info in clients.items() if sock != requesting_socket])
+    try:
+        requesting_socket.send(f"Usuarios conectados:\n{user_list}".encode('utf-8'))
+    except Exception as e:
+        print(f"Error enviando lista de usuarios: {e}")
+# El código para iniciar la función que acepta clientes
+receive_clients_thread = threading.Thread(target=receive_clients, args=(server_socket,))
+receive_clients_thread.start()
+receive_clients_thread.join()  # Esto bloqueará hasta que el hilo termine
+
+# Cerrar el socket del servidor cuando todos los hilos hayan terminado
 server_socket.close()

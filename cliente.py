@@ -19,9 +19,23 @@ except ConnectionRefusedError:
 
 def receive_messages():
     while True:
+        response = client_socket.recv(BUFFER_SIZE).decode('utf-8')
+        if "Nickname OK." in response:
+            #print("Nickname aceptado, ahora puedes comenzar a chatear.")
+            break
+        elif "Nickname invalid or already taken." in response:
+            print("Nickname inválido o ya en uso. Por favor, reinicia el cliente y prueba con otro.")
+            client_socket.close()
+            sys.exit()
+    while True:
         try:
             message = client_socket.recv(BUFFER_SIZE).decode('utf-8')
-            print(message)  # Imprime cualquier mensaje recibido del servidor
+            # Aquí vamos a asumir que el servidor envía mensajes en el formato "nickname: message"
+            if ': ' in message:  # Se verifica que el mensaje tiene el formato esperado
+                nickname, text = message.split(': ', 1)
+                print(f"{nickname}: {text}")  # Se muestra el mensaje con el nombre del remitente
+            else:
+                print(message) # Imprime cualquier mensaje recibido del servidor
             if "Nickname invalid or already taken." in message:
                 client_socket.close()
                 sys.exit()  # Salir del programa si el nickname es inválido o ya está tomado.
@@ -36,8 +50,8 @@ def receive_messages():
 
 def send_messages():
     while True:
-        message = input('')
-        if message == 'salir':
+        message = input('Yo:')
+        if message == 'salir' or message == ':q':
             client_socket.send(message.encode('utf-8'))  # Envía el comando de salida al servidor
             print("¡Adios y suerte completando tu coleccion!")
             client_socket.close()
@@ -45,7 +59,9 @@ def send_messages():
         else:
             client_socket.send(message.encode('utf-8'))  # Envía el mensaje tal cual al servidor
 
+
 nickname = input("Elija un nickname: ")
+
 client_socket.send(nickname.encode('utf-8'))
 
 # Crear y comenzar hilo para recibir mensajes
