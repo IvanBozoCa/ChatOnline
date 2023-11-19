@@ -10,7 +10,7 @@ MAX_CONNECTIONS = 3  # Máximo de clientes que pueden conectarse
 
 # Lista de clientes conectados
 clients = {}
-
+pending_offers = {} 
 # Crear un socket TCP/IP
 server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -20,11 +20,116 @@ server_socket.bind((SERVER_HOST, SERVER_PORT))
 
 # Escuchar conexiones entrantes
 server_socket.listen(MAX_CONNECTIONS)
+print(f"Servidor escuchando en {SERVER_HOST}:{SERVER_PORT}...")
 
 with open('artefactos.json', 'r') as file:
     artefactos = json.load(file)
+def send_message_to_client(nickname, message):
+    # Encuentra el socket basado en el nickname y envía el mensaje.
+    for sock, info in clients.items():
+        if info['nickname'] == nickname:
+            try:
+                sock.send(message.encode('utf-8'))
+                return
+            except Exception as e:
+                print(f"Error al enviar mensaje a {nickname}: {e}")
+                return
+    print(f"El usuario {nickname} no fue encontrado.")
 
-print(f"Servidor escuchando en {SERVER_HOST}:{SERVER_PORT}...")
+def handle_offer(sender_nickname, recipient_nickname, sender_artifact_id, recipient_artifact_id):
+    # Convertir IDs de artefactos a strings, asumiendo que los IDs en `artefactos.json` son enteros
+    sender_artifact_id = str(sender_artifact_id)
+    recipient_artifact_id = str(recipient_artifact_id)
+
+    # Verificar que tanto el emisor como el receptor existan en la lista de clientes
+    if recipient_nickname not in [info['nickname'] for _, info in clients.items()]:
+        send_message_to_client(sender_nickname, "El usuario no existe o no está conectado.")
+        return
+    
+    if sender_nickname not in [info['nickname'] for _, info in clients.items()]:
+        send_message_to_client(sender_nickname, "Algo salió mal. No estás registrado correctamente en el servidor.")
+        return
+
+    # Verificar que el emisor tenga el artefacto que ofrece y el receptor tenga el artefacto que se solicita
+    sender_socket = next((sock for sock, info in clients.items() if info['nickname'] == sender_nickname), None)
+    recipient_socket = next((sock for sock, info in clients.items() if info['nickname'] == recipient_nickname), None)
+
+    # Asegurarse de que ambos clientes están conectados
+    if not sender_socket or not recipient_socket:
+        send_message_to_client(sender_nickname, "Uno de los usuarios no está conectado.")
+        return
+
+    # Verificar posesión de artefactos
+    if sender_artifact_id not in artefactos or recipient_artifact_id not in artefactos:
+        send_message_to_client(sender_nickname, "Uno de los IDs de artefacto es inválido.")
+        return
+
+    if artefactos[sender_artifact_id] not in clients[sender_socket]['artefactos']:
+        send_message_to_client(sender_nickname, "No posees ese artefacto.")
+        return
+
+    if artefactos[recipient_artifact_id] not in clients[recipient_socket]['artefactos']:
+        send_message_to_client(sender_nickname, "El usuario no tiene el artefacto que deseas.")
+        return
+
+    # Si las verificaciones son exitosas, registrar la oferta
+    pending_offers[recipient_nickname] = {
+        'sender_nickname': sender_nickname,
+        'sender_artifact_id': sender_artifact_id,
+        'recipient_artifact_id': recipient_artifact_id
+    }
+
+    # Notificar al destinatario de la oferta
+    send_message_to_client(recipient_nickname, f"Tienes una oferta de {sender_nickname}: {artefactos[sender_artifact_id]} por tu {artefactos[recipient_artifact_id]}")
+
+def handle_accept(client_socket, recipient_nickname):
+    # Verificar si hay una oferta pendiente para el usuario que quiere aceptar
+    if recipient_nickname in pending_offers:
+        offer = pending_offers[recipient_nickname]
+        sender_nickname = offer['sender_nickname']
+        sender_socket = None
+        for sock, info in clients.items():
+            if info['nickname'] == sender_nickname:
+                sender_socket = sock
+                break
+        
+        # Asegúrate de que tanto el emisor como el receptor todavía están conectados
+        if not sender_socket or not client_socket:
+            send_message_to_client(recipient_nickname, "El intercambio no puede realizarse porque uno de los usuarios no está conectado.")
+            return
+        
+        # Asegúrate de que los artefactos aún existan
+        if offer['sender_artifact_id'] not in clients[sender_socket]['artefactos'] or offer['recipient_artifact_id'] not in clients[client_socket]['artefactos']:
+            send_message_to_client(recipient_nickname, "El intercambio no puede realizarse porque uno de los artefactos no está disponible.")
+            return
+        
+        # Intercambiar los artefactos
+        clients[sender_socket]['artefactos'].remove(offer['sender_artifact_id'])
+        clients[sender_socket]['artefactos'].append(offer['recipient_artifact_id'])
+        clients[client_socket]['artefactos'].remove(offer['recipient_artifact_id'])
+        clients[client_socket]['artefactos'].append(offer['sender_artifact_id'])
+
+        # Notificar a ambos usuarios sobre el intercambio exitoso
+        send_message_to_client(sender_nickname, f"Intercambio exitoso. Has recibido {offer['recipient_artifact_id']} de {recipient_nickname}.")
+        send_message_to_client(recipient_nickname, f"Intercambio exitoso. Has recibido {offer['sender_artifact_id']} de {sender_nickname}.")
+
+        # Eliminar la oferta de la lista de pendientes
+        del pending_offers[recipient_nickname]
+
+        # Notificar a otros clientes sobre el intercambio realizado
+        broadcast(f"¡Intercambio realizado entre {sender_nickname} y {recipient_nickname}!", 'SERVER', None)
+    else:
+        send_message_to_client(recipient_nickname, "No tienes ofertas pendientes para aceptar.")
+
+
+def handle_reject(client_socket, sender_nickname):
+    # Verificar si hay una oferta pendiente para el usuario
+    if sender_nickname in pending_offers:
+        del pending_offers[sender_nickname]
+        broadcast("Intercambio rechazado.", 'SERVER', None)
+    else:
+        send_message_to_client(sender_nickname, "No tienes ofertas pendientes para rechazar.")
+
 
 def broadcast(message, sender_nickname, sender_socket):
     for client_socket, info in clients.items():
@@ -84,10 +189,6 @@ def handle_client(client_socket):
                         client_socket.send(error_msg.encode('utf-8'))
                 elif message == ":u":
                     list_users(client_socket)
-                elif message.startswith(":offer"):
-                    _, recipient_nickname, my_artifact_id, their_artifact_id = message.split()
-                    # Aquí debes añadir la lógica para manejar la oferta de intercambio de artefactos
-                # Agregar aquí otros comandos
                 elif message == ":smile":
                     client_socket.send(":)".encode('utf-8'))
                 elif message == ':angry':
@@ -96,6 +197,14 @@ def handle_client(client_socket):
                     artefactos_usuario = clients[client_socket].get('artefactos', [])
                     artefactos_msg = "Tus artefactos son: " + ", ".join(artefactos_usuario)
                     client_socket.send(artefactos_msg.encode('utf-8'))
+                elif message ==":offer":
+                    _, recipient_nickname, my_artifact_id, their_artifact_id = message.split()
+                    handle_offer(sender_nickname, recipient_nickname, my_artifact_id, their_artifact_id)
+                elif message == ":accept":
+                    handle_accept(client_socket, sender_nickname)
+
+                elif message == ":reject":
+                    handle_reject(client_socket, sender_nickname)
                 else:
                     # Procesar envío de mensajes normales
                     broadcast(message, sender_nickname, client_socket)
